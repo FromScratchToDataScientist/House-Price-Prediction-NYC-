@@ -1,0 +1,548 @@
+---
+title: "House Prices in New York"
+author: "Abtahee Islam"
+format: 
+  revealjs:
+    auto-slide: 20000
+    embed-resources: true
+    transition: slide       
+    theme: simple           
+    slide-number: true
+---
+
+## Introduction {.smaller}
+
+- **Topic: Which property and neighborhood features best predict house prices in New York?**  
+- **Motivation:** New York has one of the most expensive housing markets in the world. Understanding its pricing system helps buyers and investors make smarter decisions.  
+- **Goal:** Identify the key variables that influence house prices and compare how their effects differ across several predictive models.
+- **Why it matters:** Property traits are complex! They jointly affect metrics like affordability and urban development.
+
+---
+
+## Dataset Overview {.smaller}
+
+- **Data source:** New York housing sales dataset (`housing-prices-ge19.txt`)  
+- **Size:** 1734 observations, 17 variables  
+- **Response variable:** Sale price of each property (USD)  
+- **Predictor variables:**  
+  - *Property features:* `Lot.Size`, `Living.Area`, `Bedrooms`, `Bathrooms`, `Fireplaces`, `Age`, `Rooms`  
+  - *Neighborhood features:* `Pct.College` (college educated residents %), `Waterfront`, `Central.Air`, `Sewer.Type`, `Fuel.Type`, `Land.Value`  
+- **Main question:** How much do location and property attributes explain prices?  
+
+```{r}
+#| label: setup-vis
+#| echo: false
+#| include: false
+
+library(data.table)   
+library(tidyverse)
+library(gt)
+library(scales)
+library(patchwork)
+library(readr)
+library(ggplot2)
+library(randomForest)
+library(dplyr)
+```
+
+```{r}
+
+data <- read_delim("housing-prices-ge19.txt", delim = "\t")
+
+```
+---
+
+## Initial Observations
+
+- **Median values of predictor variables:**  
+  - *Price* ≈ \$189,700
+  - *Lot size* ≈ 0.37 acres  
+  - *Area* ≈ 1632 square feet
+  - *Number of bedrooms* ≈ 3
+  - *Number of bathrooms* ≈ 2  
+
+```{r}
+#| label: price-dist-and-medians
+#| fig-cap: "Median summary"
+#| fig-width: 8
+#| fig-height: 4
+
+data |>
+summarise(
+median_price = median(Price, na.rm = TRUE),
+median_lot   = median(Lot.Size, na.rm = TRUE),
+median_area  = median(Living.Area, na.rm = TRUE),
+median_beds  = median(Bedrooms, na.rm = TRUE),
+median_baths = median(Bathrooms, na.rm = TRUE)
+)
+
+```
+
+---
+
+## Distribution of House Prices 
+:::{.columns}
+
+::: {.column width="50%"}
+```{r, fig.width=18, fig.height=18}
+library(ggplot2)
+library(scales)
+library(patchwork)
+
+#Histogram
+ggplot(data, aes(x = Price)) +
+  geom_histogram(binwidth = 10000, fill = "pink", color = "white") +
+  labs(title = "Histogram of house prices", x = "Price (USD)", y = "Count") +
+  scale_x_continuous(labels = scales::label_comma()) +
+  theme(plot.title = element_text(size = 50),
+        axis.text=element_text(size=18),
+        axis.title=element_text(size=40))+
+  geom_vline(aes(xintercept = median(Price, na.rm = TRUE)), color = "red", linetype = "dashed", size = 2)
+
+```
+:::
+
+::: {.column width="50%"}
+- Prices are **right-skewed**; most homes are in lower ranges.
+- **Several high-value outliers** above $500,000.
+- **Log transformation** recommended to stabilize variance.
+- **Outlier handling** improves model robustness.
+:::
+
+:::
+---
+
+## Exploring Key Predictors of House Prices
+```{r}
+data_transformed <- data |>
+filter(!is.na(Price), Price > 0) |>
+mutate(
+Price_1K = Price / 1000,
+Waterfront = as.factor(Waterfront),
+Central.Air = as.factor(Central.Air),
+New.Construct = as.factor(New.Construct),
+log_price = log(Price)
+)
+
+p1 <- ggplot(data_transformed, aes(x = Living.Area, y = Price)) +
+geom_point(alpha = 0.5, color = "#1f78b4") +
+geom_smooth(method = "lm", color = "#e31a1c", linewidth = 1) +
+scale_y_continuous(labels = label_dollar()) +
+labs(title = "Larger Living Areas Strongly Increase Price",
+x = "Living Area (sq ft)",
+y = "Price ($)") +
+theme_minimal(base_size = 11) +
+theme(plot.title = element_text(face = "bold", size = 13))
+
+
+p2 <- ggplot(data_transformed, aes(x = factor(Bathrooms), y = Price)) +
+geom_boxplot(fill = "#a6cee3", color = "#1f78b4") +
+scale_y_continuous(labels = label_dollar()) +
+labs(title = "Homes with More Bathrooms Cost More",
+x = "Number of Bathrooms",
+y = "Price ($)") +
+theme_minimal(base_size = 11) +
+theme(plot.title = element_text(face = "bold", size = 13))
+
+p3 <- ggplot(data_transformed, aes(x = Waterfront, y = Price, fill = Waterfront)) +
+geom_boxplot() +
+scale_fill_manual(values = c("#b2df8a", "#33a02c")) +
+scale_y_continuous(labels = label_dollar()) +
+labs(title = "Waterfront Properties Command Higher Prices",
+x = "Waterfront",
+y = "Price ($)") +
+theme_minimal(base_size = 11) +
+theme(legend.position = "none",
+plot.title = element_text(face = "bold", size = 13))
+
+(p1 / (p2 | p3)) + plot_annotation(tag_levels = 'A')
+```
+*In our exploratory data analysis (EDA), we examined relationships between key predictors and house prices.*
+---
+
+## Data Cleaning & Transformation
+```{r}
+data_transformed = data |>
+  mutate(Price_1K = Price / 1000) 
+
+data_transformed$Waterfront <- as.factor(data_transformed$Waterfront)
+data_transformed$Central.Air <- as.factor(data_transformed$Central.Air)
+data_transformed$New.Construct <- as.factor(data_transformed$New.Construct)
+```
+
+<div style="font-size:30px;">
+- Removed missing or invalid entries.
+- Encoded categorical variables: Central.Air, Waterfront, New.Construct.
+- Applied **log transformation** to stabilize variance.
+- Data is now clean and ready for **multiple regression modelling**.
+</div>
+
+```{r}
+data_transformed <- data |>
+filter(!is.na(Price), Price > 0) |>
+mutate(
+Price_1K = Price / 1000,
+Waterfront = as.factor(Waterfront),
+Central.Air = as.factor(Central.Air),
+New.Construct = as.factor(New.Construct),
+log_price = log(Price)
+)
+```
+
+```{r,  fig.width=10, fig.height=6}
+ggplot(data_transformed, aes(x = log_price)) +
+geom_histogram(binwidth = 0.1, fill = "steelblue", color = "white") +
+labs(title = "Log-Transformed Price Distribution", x = "log(Price)", y = "Count") +
+theme_minimal(base_size = 12) +
+theme(
+  plot.title = element_text(size = 20, face = "bold"),
+  axis.title = element_text(size=14, face = "bold")
+  )
+```
+---
+
+## Correlation Matrix & Predictor Strength
+```{r}
+
+library(GGally)
+
+vars_to_use <- c("Living.Area", "Land.Value", "Waterfront",
+                 "Pct.College", "Bathrooms", "Age", 
+                 "Bedrooms", "Lot.Size")
+
+# Convert Waterfront to factor or numeric as needed
+data_corr <- data_transformed %>% 
+  dplyr::select(all_of(vars_to_use)) %>%
+  dplyr::mutate(Waterfront = as.factor(Waterfront))
+
+ggpairs(data_corr, title = "Scatterplot & Correlation Matrix") + 
+  theme_bw()+
+   theme(
+    axis.text.x = element_text(size = 4),  
+    axis.text.y = element_text(size = 4),  
+    plot.title = element_text(size = 16),   
+    strip.text = element_text(size = 6)    
+   )
+```
+
+---
+
+### List R² of the variables(simple linear regression)
+
+```{r, echo=FALSE}
+#Computing R-squared value
+
+r2_living_area = summary(lm(Price ~ Living.Area, data = data))$r.squared
+r2_land_value = summary(lm(Price ~ Land.Value, data = data))$r.squared
+r2_waterfront = summary(lm(Price ~ Waterfront, data = data))$r.squared
+r2_pct_college = summary(lm(Price ~ Pct.College, data = data))$r.squared
+r2_bathrooms = summary(lm(Price ~ Bathrooms, data = data))$r.squared
+r2_age = summary(lm(Price ~ Age, data = data))$r.squared
+r2_bedrooms = summary(lm(Price ~ Bedrooms, data = data))$r.squared
+r2_lot_size = summary(lm(Price ~ Lot.Size, data = data))$r.squared
+
+r2_results = data.frame(
+  Variable = c("Living.Area", "Land.Value", "Waterfront", "Pct.College", 
+               "Bathrooms", "Age", "Bedrooms", "Lot.Size"),
+  R_Squared = c(r2_living_area, r2_land_value, r2_waterfront, r2_pct_college,
+                r2_bathrooms, r2_age, r2_bedrooms, r2_lot_size)
+)
+
+r2_results = r2_results[order(-r2_results$R_Squared), ]
+r2_results
+```
+###### Key Findings:
+<div style="font-size:36px;">
+- Living Area has the highest R² (0.51), explaining 51% of price variance
+
+- Land Value is second strongest predictor (R² = 0.34)
+
+- We chose statistical variables for multiple linear regression model.
+</div>
+
+---
+
+### Multiple Linear Regression Testing:
+
+```{r}
+df_data = data_transformed[, c("Price_1K", "Living.Area", "Land.Value", "Age", "Pct.College")]
+cor_data = cor(df_data)
+
+
+multi_model = lm(Price_1K ~ Living.Area + Land.Value + Age + Pct.College, data = data_transformed)
+multi_summary_model = summary(multi_model)
+multi_summary_model
+
+
+```
+<div style="font-size:32px;">
+- Median is -5.16, which is very close to 0.
+- Housing prices is strongly related with living area(0.71) and land value (0.58) and has a weak negative correlation with age(-0.19).
+- The variable can explain 61% of changes of the housing prices.
+</div>
+
+---
+
+## Diagnostic Plots and Assumption check
+
+::::: columns
+::: {.column width="50%"}
+```{r, fig.height=6}
+resid_model = resid(multi_model)
+fitted_model = fitted(multi_model)
+
+plot(fitted_model, resid_model, xlab = "Fitted Values", ylab = "Residuals", main = "Residuals vs Fitted values")
+abline(h = 0, col = "red")
+
+qqnorm(resid_model)
+qqline(resid_model, col = "red")
+
+```
+:::
+
+::: {.column width="50%"}
+- Residual Plot: Distribution is relatively constant, the variance homogeneity and linear relationship assumptions are mostly satisfied.
+
+- Q-Q plot: The middle part is normal, but there is a significant deviation in the right tail.
+:::
+:::::
+---
+
+## Random Forest Model
+
+::::: columns
+::: {.column width="60%"}
+```{r}
+set.seed(123)
+rf_model = randomForest(Price ~ Bathrooms, data = data, ntree = 100)
+
+bathroom_levels = data.frame(Bathrooms = c(1, 1.5, 2, 2.5, 3, 3.5, 4))
+predictions = predict(rf_model, newdata = bathroom_levels)
+
+result_df = data.frame(
+  Bathrooms = bathroom_levels$Bathrooms,
+  Predicted_Price = round(predictions)
+)
+
+result_df$Price_Growth = c(0, round(diff(result_df$Predicted_Price) / result_df$Predicted_Price[1:(nrow(result_df)-1)] * 100, 1))
+result_df$Price_Growth[1] = NA 
+
+rf_r2 = cor(data$Price, predict(rf_model, data))^2
+lm_r2 = summary(lm(Price ~ Bathrooms, data = data))$r.squared
+
+print(rf_model)
+
+print(result_df)
+
+
+```
+:::
+
+::: {.column width="40%"}
+<div style="font-size:30px;">
+- Non-linear approach captures relationship between bathroom and housing prices.
+- Prices increase with bathroom count but not linearly.
+- The price increase is most significant from 1.5 to 2.5 bathrooms, with diminishing returns starting with 3 bathrooms, indicating diminishing marginal returns.
+</div>
+:::
+:::::
+
+---
+
+## Model Comparison
+
+<div style="font-size:32px;">
+- We compared a **multiple linear regression** (Price ~ Living Area + Land Value + Age + Pct.College) and a **Random Forest** model.
+
+- Both models capture that larger homes and higher land values raise prices.
+
+- The **Linear Regression** achieved a higher R², meaning it explained **more variance** and captured the main **linear trends** in price.
+
+  - Linear Model R²: `r round(summary(multi_model)$r.squared, 4)`  
+  - Random Forest R²: `r round(rf_r2, 4)`
+
+- Overall, the linear model provided a strong, interpretable fit, while the Random Forest highlights how some non-linear effects may still exist in housing prices.
+</div>
+
+---
+
+## Ranking Key Predictors
+::::: {.columns}
+
+::: {.column width="40%"}
+```{r}
+df <- data_transformed
+y <- "Price"
+predictors <- c("Living.Area","Land.Value", "Age","Pct.College")
+
+form <- as.formula(paste(y, "~", paste(predictors, collapse = " + ")))
+mod  <- lm(form, data = df)
+
+coef_table <- summary(mod)$coefficients
+t_stats <- abs(coef_table[-1, 3])
+
+rank_df <- data.frame(
+  Predictor   = rownames(coef_table)[-1],
+  t_statistic = round(t_stats, 3)
+)
+rank_df <- rank_df[order(-rank_df$t_statistic), ]
+rank_df <- head(rank_df, 4)
+
+pretty_names <- c("Land.Value"="Land Value","Living.Area"="Living Area")
+rank_df$Predictor <- ifelse(rank_df$Predictor %in% names(pretty_names),
+                            pretty_names[rank_df$Predictor], rank_df$Predictor)
+
+knitr::kable(rank_df, row.names = FALSE,
+             caption = "Predictors ranked by |t-statistic|") |>
+  kableExtra::kable_styling(font_size = 36)
+```
+:::
+
+::: {.column width="60%"}
+<div style="font-size:32px;">
+- Predictors are ranked by the absolute value of the test statistics from the multiple linear regression model.
+
+- Higher |t| values indicate stronger evidence that a variable affects price.
+
+- **Land Value** and **Living Area** are the strongest predictors which show that property size and land worth are the main drivers of New York housing prices.
+</div>
+:::
+
+:::::
+
+---
+
+## Predicted vs Actual Prices
+
+::::: {.columns}
+::: {.column width="60%"}
+
+```{r}
+data_transformed$Predicted_Price <- predict(multi_model, data_transformed)
+
+price_comp <- data_transformed |>
+  mutate(Price_Range = cut(Price_1K, breaks = c(0, 100, 200, 300, 400, 500, 1000), 
+                           labels = c("<100", "100–200", "200–300", "300–400", "400–500", "500+"))) |>
+  group_by(Price_Range) |>
+  summarise(
+    Actual = mean(Price_1K, na.rm = TRUE),
+    Predicted = mean(Predicted_Price, na.rm = TRUE)
+  ) |>
+  pivot_longer(cols = c("Actual", "Predicted"), names_to = "Type", values_to = "Price")
+
+
+ggplot(price_comp, aes(x = Price_Range, y = Price, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Average Predicted vs Actual Prices by Price Range",
+    x = "Actual Price Range (in $1,000s)",
+    y = "Average Price (in $1,000s)"
+  ) +
+  scale_fill_manual(values = c("Actual" = "red", "Predicted" = "lightblue")) +
+  theme_minimal()
+```
+:::
+::: {.column width="40%"}
+<div style="font-size:26px;">
+
+- The bar plot compares average predicted prices from the multiple linear regression model against actual house prices across different price ranges.
+
+- The model fits mid-range properties (200–400K) quite well, showing similar predicted and actual prices.
+
+- For lower-priced homes, predictions are slightly overestimated, while high-end homes (500K+) are underpredicted. 
+
+</div>
+:::
+:::::
+
+---
+
+## Model Limitations
+<div style= "font-size:32px;">
+- The **Multiple Linear Regression model** assumes linear relationship between predictors and prices which does not hold in real-world markets as prices usually behave non-linearly.
+
+<br>
+
+- The **Random Forest model** captures non-linear relationships but it lacks transparency, making it difficult to interpret how each variable affects prices.
+
+<br>
+
+- Both models only used selected predictors, so not including other variables may reduce accuracy and leave out important factors influencing price.
+</div>
+
+---
+
+## Key Insights
+
+<div style="font-size:26px;">
+
+### What We Found
+- **Living Area** dominates; **Land Value** is next strongest  
+- Bathrooms / Waterfront / Central Air ↑ price  
+- **Age** ↓ price; **Pct.College** modest positive  
+- RF reveals **non-linear patterns** and **diminishing returns**
+
+### What It Means
+- Price drivers center on **home size** and **land worth**  
+- **Neighborhood quality** adds value, but physical traits dominate  
+- Linear captures main trends; RF uncovers **non-linearities**
+</div>
+
+---
+
+## Practical Implications
+
+<div style="font-size:26px;">
+
+### For Buyers
+- Use key attributes to **benchmark fair value**  
+- Spot listings that are **over-/under-priced**  
+- Value-add: increase usable space / modernize age-sensitive features
+
+### For Developers
+- Prioritize **land acquisition** & **usable living area**  
+- Extra rooms/baths beyond needs → **diminishing returns**  
+- Newer construction tends to price higher (mitigate “age” effect)
+
+### For Investors & Policy
+- Target **high-education, fair-priced** neighborhoods  
+- Support **affordability** and **zoning** assessments
+</div>
+
+---
+
+## Conclusion
+
+<div style="font-size:26px;">
+
+### Summary of Findings
+
+- Both **MLR** and **RF** agree: **Land Value, Living Area, Pct.College** matter most  
+- **Linear** = interpretable, significant relationships  
+- **RF** = non-linear effects & interactions  
+- Together they explain **>60%** of price variation (in our sample)
+
+### Key Takeaways
+- Core economics: **scale + land**  
+- **Statistics + ML** → accuracy **and** interpretability  
+- Results inform buying, development, and investment choices
+</div>
+
+---
+
+### Future Work
+- Add **geo-coordinates** for spatial effects  
+- Enrich **income / crime / school quality** variables  
+- Include **time trends**; cross-city comparisons
+
+
+
+
+
+
+
+
+
+
+
+

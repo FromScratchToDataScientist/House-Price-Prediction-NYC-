@@ -1,0 +1,227 @@
+---
+title: "Stepwise"
+output: html_document
+date: "2025-11-08"
+---
+
+```{r setup-vis, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE}
+
+library(data.table)
+library(tidyverse)
+library(gt)
+library(scales)
+library(patchwork)
+library(readr)
+library(ggplot2)
+library(randomForest)
+library(dplyr)
+library(MASS)
+library(caret)
+library(modelsummary)
+
+data <- readr::read_delim("housing-prices-ge19.txt", delim = "\t")
+
+data_transformed <- data |>
+  dplyr::filter(!is.na(Price), Price > 0) |>
+  dplyr::mutate(
+    Price_1K      = Price / 1000,
+    log_price     = log(Price),
+    Waterfront    = as.factor(Waterfront),
+    Central.Air   = as.factor(Central.Air),
+    New.Construct = as.factor(New.Construct)
+  )
+
+
+full <- lm(Price ~ Living.Area + Land.Value + Age + Bathrooms + Rooms +
+             Fireplaces + Pct.College + Waterfront, data = data_transformed)
+
+null <- lm(Price ~ 1, data = data_transformed)
+
+step.fwd.aic  <- stepAIC(null,
+                         scope = list(lower = formula(null), upper = formula(full)),
+                         direction = "forward", trace = FALSE)
+step.back.aic <- stepAIC(full, direction = "backward", trace = FALSE)
+
+modelsummary::modelsummary(
+  list("Forward model" = step.fwd.aic,
+       "Backward model" = step.back.aic),
+  output = "html",
+  estimate = "{estimate}",           
+  statistic = "p.value",             
+  statistic_rename = c("p.value"="p"),
+  gof_omit = "IC|Log.Lik",
+  fmt = 2,                           
+  shape = term ~ model + statistic   
+)
+
+
+```
+```{r}
+set.seed(1)
+
+train_control <- trainControl(method = "cv", number = 10)
+
+cv_model <- train(
+  Price ~ Living.Area + Land.Value + Age + Bathrooms + Rooms +
+           Fireplaces + Pct.College + Waterfront,
+  data = data_transformed,
+  method = "lm",
+  trControl = train_control
+)
+
+print(cv_model)
+```
+
+```{r exhaustive-leaps, echo=FALSE, message=FALSE, warning=FALSE}
+library(leaps)
+# choose a clean numeric set (factors → numeric so regsubsets behaves)
+df_leaps <- data_transformed |>
+  dplyr::transmute(
+    log_price,
+    Living.Area, Land.Value, Age, Bathrooms, Rooms, Fireplaces, Pct.College,
+    Waterfront = as.integer(Waterfront) - 1  # 0/1
+  )
+
+preds <- setdiff(names(df_leaps), "log_price")
+form  <- as.formula(paste("log_price ~", paste(preds, collapse = " + ")))
+
+exh <- regsubsets(form, data = df_leaps,
+                  nvmax = length(preds), method = "exhaustive")
+exh_sum <- summary(exh)
+
+# Which model size is best by BIC?
+best_row <- which.min(exh_sum$bic)
+best_vars <- names(which(exh_sum$which[best_row,]))   # includes "(Intercept)"
+best_vars <- setdiff(best_vars, "(Intercept)")
+
+cat("Best (by BIC): ", paste(best_vars, collapse = ", "), "\n")
+
+```
+```{r, echo=FALSE, fig.width=8, fig.height=4.5}
+op <- par(mar = c(5, 10, 3, 2) + 0.1, xpd = NA)
+plot(exh, scale = "bic")
+
+usr <- par("usr")
+rect(usr[1] - 0.12*(usr[2]-usr[1]), usr[3], usr[1] + 0.005*(usr[2]-usr[1]), usr[4],
+     col = "white", border = NA)
+
+yy   <- seq_len(nrow(exh_sum$which))
+labs <- sprintf("%.2f", exh_sum$bic)
+
+mtext(labs, side = 2, at = yy, line = 0.8, las = 1, cex = 0.9) 
+mtext("BIC",  side = 2, line = 4)  
+
+par(op)
+```
+
+
+```{r leaps-heatmap-clean, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# predictors used in the exhaustive search
+preds <- setdiff(names(df_leaps), "log_price")
+
+# inclusion matrix -> long format
+inc_mat <- as.data.frame(exh_sum$outmat)[, preds, drop = FALSE] |>
+  mutate(model = dplyr::row_number(),  # model index
+         bic   = exh_sum$bic)
+
+inc_long <- inc_mat |>
+  tidyr::pivot_longer(all_of(preds), names_to = "predictor", values_to = "inc") |>
+  mutate(included = as.integer(inc == "*"))
+
+# order rows by BIC (best first) and predictors by inclusion frequency
+row_order <- inc_long |>
+  distinct(model, bic) |>
+  arrange(bic) |>
+  mutate(rank = row_number())
+
+pred_order <- inc_long |>
+  group_by(predictor) |>
+  summarise(freq = sum(included), .groups = "drop") |>
+  arrange(desc(freq)) |>
+  pull(predictor)
+
+inc_long2 <- inc_long |>
+  left_join(row_order, by = "model") |>
+  mutate(predictor = factor(predictor, levels = pred_order))
+
+ggplot(inc_long2, aes(x = predictor, y = rank, fill = factor(included))) +
+  geom_tile(color = "white") +
+  scale_y_reverse() +
+  scale_fill_manual(
+    values = c("0" = "grey90", "1" = "#1f77b4"),
+    breaks = c("1","0"),
+    labels = c("Included","Excluded")
+  ) +
+  labs(title = "Exhaustive subset selection (BIC)",
+       x = NULL, y = "Models (best BIC at top)", fill = NULL) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("exhaustive_heatmap.png", width = 7, height = 4, dpi = 300)
+
+```
+
+
+```{r}
+final_model <- step.fwd.aic   # or step.back.aic, whichever you choose
+
+# 1. Check Regression Assumptions
+par(mfrow = c(2,2))
+plot(final_model)
+par(mfrow = c(1,1))
+
+# 2. VIF - Multicollinearity Check
+library(car)
+vif(final_model)
+
+# 3. Histogram of Residuals
+hist(residuals(final_model), main = "Residual Distribution", xlab = "Residuals")
+
+```
+```{r corr-heatmap, echo=FALSE, message=FALSE, warning=FALSE, fig.width=7, fig.height=6}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# 1) Pick numeric variables to include
+num_df <- data_transformed %>%
+  dplyr::select(
+    Price, log_price, Living.Area, Land.Value, Age, Bathrooms,
+    Rooms, Fireplaces, Pct.College, Lot.Size
+  ) %>%
+  dplyr::select(where(is.numeric))
+
+# 2) Correlation matrix (Pearson). Use method="spearman" if you prefer ranks.
+C <- cor(num_df, use = "pairwise.complete.obs", method = "pearson")
+
+# 3) Reorder rows/cols by hierarchical clustering on |cor|
+ord <- hclust(as.dist(1 - abs(C)))$order
+C   <- C[ord, ord]
+
+# 4) Long format for ggplot
+corr_long <- as.data.frame(C) %>%
+  tibble::rownames_to_column("Var1") %>%
+  pivot_longer(-Var1, names_to = "Var2", values_to = "corr")
+
+# 5) Plot
+ggplot(corr_long, aes(x = Var2, y = Var1, fill = corr)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(limits = c(-1, 1), midpoint = 0,
+                       low = "#2166ac", mid = "white", high = "#b2182b",
+                       name = "Correlation") +
+  coord_fixed() +
+  labs(title = "Correlation Heatmap",
+       x = NULL, y = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+```
+
